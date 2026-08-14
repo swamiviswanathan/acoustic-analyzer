@@ -61,7 +61,7 @@ Works on your Mac today using the built-in mic; identical on the Jetson later.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/swamiviswanathan/acoustic-analyzer.git
+git clone <repo-url> acoustic-analyzer
 cd acoustic-analyzer
 
 # 2. Local LLM
@@ -132,16 +132,20 @@ OS-by-OS instructions (including the Windows/WSL caveats) are in
 
 ## Documentation
 
-`docs/` is organized by project: **PROJECT.md** is the top-level hub, then a folder per build
-(`mic-frontend/`, `display/`), shared `platform/` docs, and `architecture/` diagrams.
+**[docs/README.md](docs/README.md) is the map.** The repo now hosts **two build tracks** on the one
+Jetson — the acoustic analyzer (electrical) and a mechanical build — sharing the hardware, the
+cluster, the local model, and where possible the DSP code.
 
 | Doc | Contents |
 |-----|----------|
-| [docs/PROJECT.md](docs/PROJECT.md) | Full design, soldering, BOM, what to ask it, roadmap, future ideas |
-| **Mic front-end** — [HARDWARE-BENCH.md](docs/mic-frontend/HARDWARE-BENCH.md) | Bench companion: pinouts, soldering how-to, symptom→fix troubleshooting |
+| [docs/README.md](docs/README.md) | **Documentation map** — both tracks, shared platform, diagrams |
+| **Acoustic (electrical)** — [docs/PROJECT.md](docs/PROJECT.md) | Full design, soldering, BOM, what to ask it, roadmap, future ideas |
+| [HARDWARE-BENCH.md](docs/mic-frontend/HARDWARE-BENCH.md) | Bench companion: pinouts, soldering how-to, symptom→fix troubleshooting |
 | [docs/mic-frontend/TEST-HARDWARE.md](docs/mic-frontend/TEST-HARDWARE.md) | Test the soldered board on a Mac or Windows PC (no Jetson) |
 | [docs/mic-frontend/acoustic-wiring.svg](docs/mic-frontend/acoustic-wiring.svg) | Pin-level solder map + checklist |
-| **Display** — [DISPLAY-BUILD.md](docs/display/DISPLAY-BUILD.md) | Sound-reactive OLED + LED bar: schematic, BOM, current budget, bring-up |
+| [DISPLAY-BUILD.md](docs/display/DISPLAY-BUILD.md) | Sound-reactive OLED + LED bar: schematic, BOM, current budget, bring-up |
+| **Mechanical** — [docs/mechanical/README.md](docs/mechanical/README.md) | **Start here** for the mechanical track: orientation, control architecture, first-hour exercise |
+| [docs/mechanical/OPTIONS.md](docs/mechanical/OPTIONS.md) | Three candidate rigs — BOMs, milestones, trade-offs, recommendation |
 | **Platform** — [JETSON-SETUP.md](docs/platform/JETSON-SETUP.md) | Bootstrap the Jetson Orin Nano (Apple-Silicon-friendly) |
 | [docs/platform/DEPLOY-K3S.md](docs/platform/DEPLOY-K3S.md) | Deploy the stack on k3s (Ollama + tool service + terminal UI, on NVMe) |
 

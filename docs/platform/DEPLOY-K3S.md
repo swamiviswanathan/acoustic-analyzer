@@ -17,6 +17,13 @@ you get the agent's REPL. Manifests: [`deploy/k8s/`](../../deploy/k8s/).
 > **Why k3s here:** lightweight, official arm64, ideal for a single edge node. It uses
 > **containerd**, not Docker — which changes how the local image gets in (step 4).
 
+> 🏷️ **Hostnames in this doc are placeholders.** Every example uses **`jetson.local`**. Either name
+> your board `jetson` (`sudo hostnamectl set-hostname jetson`, see §"Give the Jetson a home DNS
+> name") so that resolves via mDNS, or substitute your own hostname throughout — including in the
+> registry address, the manifests' `image:` lines, and `PUBLIC_URL`. The `Makefile` reads
+> `REG`, so `make deploy REG=<your-host>:30500` overrides it without editing anything; put it in a
+> gitignored `Makefile.local` to make it permanent.
+
 ---
 
 ## 1 · Install k3s (with TLS names + a readable kubeconfig)
@@ -37,8 +44,8 @@ sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<'EOF'
 data-dir: /mnt/nvme/k3s                # store ALL k3s data (images + PVCs) on the fast NVMe
 write-kubeconfig-mode: "0644"          # your user can read the kubeconfig (no sudo/chown needed)
 tls-san:                               # names/IPs the API cert must be valid for
-  - sachin-jetson.local
-  - sachin-jetson.lan
+  - jetson.local
+  - jetson.lan
   - 10.0.0.200
 disable:
   - traefik                            # we use NodePort, not Ingress — skips Traefik + its svclb pod
@@ -127,25 +134,25 @@ NVMe it lands there automatically.
 
 The everyday loop is `build → push → restart`, all via `kubectl`/`docker`, **no sudo**. It's
 powered by a private registry running *in the cluster* on the NVMe
-([`deploy/registry/registry.yaml`](../../deploy/registry/registry.yaml) — its own `registry` namespace — pushed/pulled at `sachin-jetson.local:30500`).
+([`deploy/registry/registry.yaml`](../../deploy/registry/registry.yaml) — its own `registry` namespace — pushed/pulled at `jetson.local:30500`).
 Your Mac and the Jetson are both **arm64**, so a Mac build runs on the Jetson as-is.
 
 ### One-time setup
 1. **Start the registry:** `kubectl apply -f deploy/registry/registry.yaml` → check
-   `curl http://sachin-jetson.local:30500/v2/` returns `200`.
+   `curl http://jetson.local:30500/v2/` returns `200`.
 2. **Tell k3s to trust it** (insecure HTTP on the LAN) — *the only sudo, once*:
    ```bash
    # on the Jetson:
    sudo tee /etc/rancher/k3s/registries.yaml >/dev/null <<'EOF'
    mirrors:
-     "sachin-jetson.local:30500":
+     "jetson.local:30500":
        endpoint:
-         - "http://sachin-jetson.local:30500"
+         - "http://jetson.local:30500"
    EOF
    sudo systemctl restart k3s
    ```
 3. **Let Docker push over HTTP** — on the Mac, Docker Desktop → Settings → Docker Engine, add:
-   `"insecure-registries": ["sachin-jetson.local:30500"]` → Apply & Restart.
+   `"insecure-registries": ["jetson.local:30500"]` → Apply & Restart.
 
 ### The everyday loop (sudo-free, scriptable — see the [`Makefile`](../../Makefile))
 ```bash
@@ -154,11 +161,11 @@ make restart      # just re-pull + restart (no rebuild)
 make configmaps   # refresh the agent-shell / prompt ConfigMaps (no image)
 make logs
 ```
-The app manifests use `image: sachin-jetson.local:30500/acoustic-tools:latest` +
+The app manifests use `image: jetson.local:30500/acoustic-tools:latest` +
 `imagePullPolicy: Always`, so each `rollout restart` pulls the freshly-pushed image.
 
 > **Offline fallback** (no registry, e.g. first bring-up before setup): build + import a tarball —
-> `docker save acoustic-tools:local | gzip | ssh sachin@sachin-jetson.local 'gunzip | sudo k3s ctr images import -'`
+> `docker save acoustic-tools:local | gzip | ssh <user>@jetson.local 'gunzip | sudo k3s ctr images import -'`
 > (this one needs sudo; the registry loop above does not).
 
 ---
@@ -254,9 +261,10 @@ firewall: `sudo ufw allow 30088/tcp`.)
 **Give the Jetson a home DNS name (recommended).** A stable name beats chasing IPs and makes the
 TLS cert clean. Pick one:
 
-- **mDNS `.local` — zero setup:** Ubuntu runs avahi, so the Jetson already answers to
-  **`sachin-jetson.local`** on the LAN (macOS resolves `.local` natively). Test: `ping sachin-jetson.local`
-  from the Mac. Shorter name? `sudo hostnamectl set-hostname jetson` → then `jetson.local`.
+- **mDNS `.local` — zero setup:** Ubuntu runs avahi, so the Jetson answers to
+  **`<its-hostname>.local`** on the LAN (macOS resolves `.local` natively). Name it `jetson` with
+  `sudo hostnamectl set-hostname jetson` and it answers to `jetson.local`. Test: `ping jetson.local`
+  from the Mac.
 - **Router DHCP reservation + name (most robust):** reserve the Jetson's MAC to a fixed IP and name
   it in the router (e.g. `jetson`) so it resolves everywhere and survives reboots.
 - **Pi-hole / dnsmasq:** add `address=/jetson.home/<jetson-ip>`.
@@ -269,7 +277,7 @@ the dynamic cert):
 # on the Jetson:
 sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<'EOF'
 tls-san:
-  - sachin-jetson.local
+  - jetson.local
   - jetson
   - <jetson-ip>
 EOF
@@ -282,10 +290,10 @@ sudo openssl x509 -in /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt
 ```
 Now point the Mac's kubeconfig at the name and use the terminal by name:
 ```bash
-sed -i '' 's#https://127.0.0.1:6443#https://sachin-jetson.local:6443#' ~/.kube/jetson.yaml
+sed -i '' 's#https://127.0.0.1:6443#https://jetson.local:6443#' ~/.kube/jetson.yaml
 kubectl get nodes
-# terminal UI:   http://sachin-jetson.local:30088
-# tool service:  http://sachin-jetson.local:30800/healthz
+# terminal UI:   http://jetson.local:30088
+# tool service:  http://jetson.local:30800/healthz
 ```
 
 **What's exposed on the LAN:** `acoustic-chat` (`:30088`, the terminal UI) and `acoustic-tools`
