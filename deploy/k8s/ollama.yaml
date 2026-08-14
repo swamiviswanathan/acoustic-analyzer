@@ -35,7 +35,11 @@ spec:
       runtimeClassName: nvidia        # <-- Jetson GPU
       containers:
         - name: ollama
-          image: ollama/ollama:latest # GPU not used on Jetson? switch to: dustynv/ollama:latest
+          # Pinned, NOT :latest — with :latest k8s defaults to imagePullPolicy Always and
+          # re-downloads the whole image on every restart/reboot. Pin + IfNotPresent = use the
+          # copy already on the node. Bump this tag deliberately when you want a newer Ollama.
+          image: ollama/ollama:0.32.1   # GPU not used on Jetson? switch to: dustynv/ollama
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 11434
           env:
