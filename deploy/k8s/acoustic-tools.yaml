@@ -5,6 +5,11 @@ metadata:
   namespace: acoustic
 spec:
   replicas: 1
+  # This pod OWNS the USB audio adapter, which allows a single opener. A rolling update starts
+  # the new pod while the old one still holds the card, so PortAudio in the new process
+  # enumerates without it and falls back to the silent onboard APE for the rest of its life.
+  # Recreate makes the old pod release the hardware before the replacement starts.
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: acoustic-tools }
   template:
@@ -19,20 +24,31 @@ spec:
             - containerPort: 8000
           env:
             - name: ACOUSTIC_DEMO
-              value: "1"                    # no mic yet -> synthetic signal. Set "0" once wired.
+              value: "0"                    # LIVE: records from the USB audio adapter (hw:0,0)
+            - name: DISPLAY_FPS
+              value: "3"                    # OLED scope repaints/sec. Lower = calmer trace.
             - name: PUBLIC_URL
               value: "http://sachin-jetson.local:30800"   # so /spectrum hands back a browser-openable /scope link
           readinessProbe:
             httpGet: { path: /healthz, port: 8000 }
             initialDelaySeconds: 5
           # --- mic passthrough: uncomment when the USB audio adapter is plugged in ---
+          # --- display passthrough: OLED (I2C bus 7) + SK9822 LED bar (SPI0) ---
+          # service.py's /display endpoint runs in THIS pod, so the device access lives
+          # here (not on acoustic-chat, which only makes HTTP calls to this service).
           securityContext:
              privileged: true
           volumeMounts:
-             - { name: snd, mountPath: /dev/snd }
+             - { name: snd,  mountPath: /dev/snd }
+             - { name: i2c7, mountPath: /dev/i2c-7 }
+             - { name: spi0, mountPath: /dev/spidev0.0 }
       volumes:
          - name: snd
            hostPath: { path: /dev/snd }
+         - name: i2c7
+           hostPath: { path: /dev/i2c-7 }
+         - name: spi0
+           hostPath: { path: /dev/spidev0.0 }
 ---
 apiVersion: v1
 kind: Service

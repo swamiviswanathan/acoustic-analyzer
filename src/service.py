@@ -20,6 +20,7 @@ the board is soldered:
 
 import collections
 import os
+import sys
 import threading
 import time
 from typing import Optional
@@ -40,6 +41,10 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 DEMO = os.environ.get("ACOUSTIC_DEMO") == "1"
+# OLED repaints per second. The producer ticks at 10 Hz, but redrawing the scope trace that
+# fast reads as jitter rather than motion - the waveform never settles long enough to look at.
+# 0 pins it to the producer's rate; tune with the DISPLAY_FPS env var, no rebuild needed.
+DISPLAY_FPS = float(os.environ.get("DISPLAY_FPS", "3"))
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")   # e.g. http://sachin-jetson.local:30800
 
 # The most recent explicitly-captured clip, kept so follow-up questions and the "show me the
@@ -76,7 +81,10 @@ def _source(wav_path):
 
 
 class AudioReq(BaseModel):
-    seconds: float = 2.0
+    # Optional (not plain float): small models sometimes send explicit `null` for an
+    # unset arg rather than omitting it, and a bare `float` rejects that with a 422
+    # before the handler ever runs. Every handler already does `seconds or <default>`.
+    seconds: Optional[float] = 2.0
     wav_path: Optional[str] = None
 
 
@@ -89,8 +97,13 @@ def root():
 def healthz():
     """Service status, whether a microphone is available, and demo-mode state."""
     devs = T.list_input_devices().get("input_devices", [])
+    with _WF_LOCK:
+        columns = _WF["seq"]
+    # waterfall_columns must RISE between calls; stuck at 0 means the producer never got audio
+    # (the failure that silently killed /scope), so surface it here instead of only in the logs.
     return {"status": "ok", "microphone_available": len(devs) > 0,
-            "input_devices": devs, "demo_mode": DEMO}
+            "input_devices": devs, "demo_mode": DEMO,
+            "waterfall_columns": columns, "input_device_index": T.input_device()}
 
 
 @app.post("/analyze", summary="Analyze the current sound")
@@ -99,11 +112,18 @@ def analyze(req: AudioReq):
     loudness (rms_db), dominant frequency, tonal peaks, spectral centroid, a 60 Hz mains-hum
     score, per-band energy, and a heuristic label. Call this to answer what a sound is, how
     loud it is, whether there is hum, or what frequency something is."""
-    facts = T.capture_and_analyze(seconds=req.seconds, wav_path=_source(req.wav_path))
+    source = _source(req.wav_path)
+    if source:                                   # explicit wav, or the synthetic demo signal
+        facts = T.capture_and_analyze(seconds=req.seconds, wav_path=source)
+    else:
+        samples, sr = _tail_samples(float(req.seconds or 2.0))   # from the producer's buffer
+        if samples.size < 512:
+            return {"error": "no audio available yet",
+                    "hint": "The microphone feed has not produced samples yet - check /healthz."}
+        facts = T.analyze(samples, sr)
     # Never hand the model an internal filesystem path: it will happily serve it back to the user
     # as if it were a shareable link. Report the source in words instead.
-    if "source" in facts:
-        facts["source"] = "demo signal" if DEMO else "microphone"
+    facts["source"] = "demo signal" if DEMO else "microphone"
     return facts
 
 
@@ -140,12 +160,65 @@ def spectrum(req: AudioReq):
     return {"view_url": url, "note": "Open %s in a browser to watch the live spectrogram." % url}
 
 
+# ---- the shared audio buffer: the producer is the ONLY owner of the microphone ---------------
+# The USB adapter accepts a single opener. While the producer thread holds it for the waterfall,
+# any handler that opens its own stream gets PaErrorCode -9985 (Device unavailable) - which is
+# what broke /analyze and /capture. So the producer publishes every chunk it reads here, and the
+# handlers read from this buffer instead of touching the device.
+AUDIO_KEEP_S = 30.0        # history retained; also the longest clip /capture can return
+_AUDIO = {"chunks": collections.deque(), "held": 0, "total": 0, "sr": 44100}
+_AUDIO_LOCK = threading.Lock()
+
+
+def _publish_audio(chunk, sr):
+    """Called by the producer with each freshly-read chunk. Stores numpy blocks rather than
+    individual samples - a deque of 30 s of Python floats would cost tens of MB."""
+    with _AUDIO_LOCK:
+        _AUDIO["sr"] = sr
+        _AUDIO["chunks"].append(np.asarray(chunk, dtype=np.float64).flatten())
+        _AUDIO["held"] += _AUDIO["chunks"][-1].size
+        _AUDIO["total"] += _AUDIO["chunks"][-1].size    # monotonic: never trimmed
+        while len(_AUDIO["chunks"]) > 1 and _AUDIO["held"] - _AUDIO["chunks"][0].size >= AUDIO_KEEP_S * sr:
+            _AUDIO["held"] -= _AUDIO["chunks"].popleft().size
+
+
+def _tail_samples(seconds):
+    """The most recent `seconds` of audio already in the buffer. Returns immediately."""
+    with _AUDIO_LOCK:
+        sr = _AUDIO["sr"]
+        if not _AUDIO["chunks"]:
+            return np.zeros(0), sr
+        buf = np.concatenate(_AUDIO["chunks"])
+    return buf[-int(max(0.1, seconds) * sr):], sr
+
+
+def _await_samples(seconds, grace=4.0):
+    """Wait for `seconds` of NEW audio, then return it.
+
+    "Capture the next 10 seconds" means forward in time, so this waits for fresh audio rather
+    than handing back history. Falls back to whatever accumulated if the producer stalls, so a
+    wedged mic degrades to a short clip instead of hanging the request.
+    """
+    with _AUDIO_LOCK:
+        start, sr = _AUDIO["total"], _AUDIO["sr"]
+    want = int(max(0.1, seconds) * sr)
+    deadline = time.monotonic() + seconds + grace
+    while True:
+        with _AUDIO_LOCK:
+            if _AUDIO["total"] - start >= want:
+                break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return _tail_samples(seconds)
+
+
 def _capture_samples(seconds):
-    """Record `seconds` of real audio (mic), or synthesize a continuous demo clip of that length."""
-    sr = 44100
+    """`seconds` of real audio from the shared buffer, or a synthesized demo clip."""
     if DEMO:
+        sr = 44100
         return _DemoStream(sr).chunk(int(seconds * sr)), sr
-    return T._record(seconds), sr
+    return _await_samples(seconds)
 
 
 def _clip_grid(samples, sr, nfreq=72, ntime=200, fmax=4000.0):
@@ -165,6 +238,47 @@ def _clip_grid(samples, sr, nfreq=72, ntime=200, fmax=4000.0):
     norm = np.clip((d - WF_VMIN) / (WF_VMAX - WF_VMIN), 0, 1)
     return {"nfreq": nfreq, "ntime": ntime, "fmax_khz": fmax / 1000.0,
             "grid": (norm * 255).astype(int).tolist()}   # grid[freq][time], freq 0 = low
+
+
+@app.post("/display", summary="Resume the live OLED + LED bar")
+def display():
+    """Resume the live OLED spectrum display and LED VU meter - they react continuously to
+    the microphone (driven by the same background loop that feeds /scope). Call this when
+    the user asks to light up, turn on, resume, or show the display."""
+    return T.show_on_display()
+
+
+class TextReq(BaseModel):
+    text: Optional[str] = None    # see AudioReq.seconds for why this isn't a bare str
+    scroll: Optional[bool] = None # None = auto: scroll only if the message would not fit
+
+
+@app.post("/display/text", summary="Print or scroll a text message on the OLED")
+def display_text(req: TextReq):
+    """Print SPECIFIC WORDS on the physical OLED screen - use this when the user asks to write,
+    print, show, or SCROLL a message/text/words on the display. Set scroll=true for a scrolling
+    marquee/ticker; long messages scroll automatically. This does not listen to the microphone;
+    it is different from the display tool, which shows the live sound spectrum. The message stays
+    up until the display tool is called again."""
+    return T.show_text_on_display(text=req.text, scroll=req.scroll)
+
+
+@app.post("/display/clear", summary="Turn off the display")
+def display_clear():
+    """Pause the live display: blank the OLED and turn off the LED bar. Call this when the
+    user asks to turn off, stop, clear, or blank the display."""
+    return T.clear_display()
+
+
+class BrightnessReq(BaseModel):
+    percent: Optional[float] = 50   # see AudioReq.seconds for why this isn't a bare float
+
+
+@app.post("/display/brightness", summary="Set the LED bar brightness")
+def display_brightness(req: BrightnessReq):
+    """Set the LED bar's brightness from 0 (off) to 100 (max) and re-light it immediately at
+    the current level. Call this when the user asks to dim, brighten, or set the LED brightness."""
+    return T.set_display_brightness(percent=req.percent)
 
 
 @app.get("/spectrum-clip", include_in_schema=False)
@@ -237,14 +351,74 @@ class _DemoStream:
         return x
 
 
+MIC_TIMEOUT = 3.0   # no audio for this long -> assume the stream is wedged and rebuild it
+
+
+def _refresh_audio_devices():
+    """Force PortAudio to re-enumerate its device list.
+
+    That list is snapshotted at initialization. A pod that starts while the previous one still
+    holds the USB adapter enumerates WITHOUT it, silently falls back to the onboard APE (which
+    delivers no samples), and stays wrong for the life of the process even after the USB card
+    frees up. Only safe with no stream open - call it before opening one.
+    """
+    import sounddevice as sd
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as e:
+        print("[_producer] device re-enumeration failed: %s: %s" % (type(e).__name__, e),
+              file=sys.stderr, flush=True)
+
+
+def _close_mic(state):
+    stream = state.pop("stream", None)
+    state.pop("queue", None)
+    if stream is not None:
+        try:
+            # abort(), not stop(): stop() drains the buffer, and draining a device that never
+            # delivers blocks in poll() forever - the teardown then wedges the producer thread
+            # more thoroughly than the read did.
+            stream.abort()
+            stream.close()
+        except Exception:
+            pass
+
+
 def _mic_chunk(state, n, sr):
-    """Read ~n samples from a persistent input stream (mic path; used once ACOUSTIC_DEMO=0)."""
+    """Read ~n samples from a persistent input stream (mic path; used once ACOUSTIC_DEMO=0).
+
+    Callback+queue rather than a blocking stream.read(): a blocking read on a device that
+    never delivers - the wrong card, an unplugged adapter - parks this thread forever with no
+    exception and no log line, which silently kills the whole waterfall. A queue gives us a
+    TIMEOUT instead, so a wedged stream raises, gets torn down, and is rebuilt on the next
+    pass through the producer loop. The device is pinned rather than left to PortAudio's default.
+    """
+    import queue
     import sounddevice as sd
     if state.get("stream") is None:
-        state["stream"] = sd.InputStream(samplerate=sr, channels=1, dtype="float32")
-        state["stream"].start()
-    data, _ = state["stream"].read(n)
-    return np.asarray(data).flatten()
+        q = queue.Queue(maxsize=64)
+
+        def _cb(indata, _frames, _time, _status):
+            try:
+                q.put_nowait(indata.copy())   # drop rather than block the audio callback
+            except queue.Full:
+                pass
+
+        device = T.input_device()
+        if device is None:
+            _refresh_audio_devices()   # the USB card may have appeared since PortAudio started
+            device = T.input_device()
+        stream = sd.InputStream(samplerate=sr, channels=1, dtype="float32",
+                                blocksize=n, device=device, callback=_cb)
+        stream.start()
+        state["stream"], state["queue"] = stream, q
+        print("[_producer] mic stream opened on device %r" % (device,), file=sys.stderr, flush=True)
+    try:
+        return np.asarray(state["queue"].get(timeout=MIC_TIMEOUT)).flatten()
+    except Exception:
+        _close_mic(state)   # cleared, so the next iteration reopens from scratch
+        raise RuntimeError("no audio for %.0fs - rebuilding the mic stream" % MIC_TIMEOUT)
 
 
 def _producer():
@@ -252,7 +426,8 @@ def _producer():
     n = int(WF_COL_DT * sr)
     gen = _DemoStream(sr)
     mic = {}
-    recent = collections.deque(maxlen=int(1.5 * sr))   # rolling audio for the heuristic label
+    last_facts = {}
+    last_render = 0.0
     i = 0
     while True:
         try:
@@ -261,19 +436,41 @@ def _producer():
                 time.sleep(WF_COL_DT)                   # pace the synthetic feed to real time
             else:
                 x = _mic_chunk(mic, n, sr)              # the read itself paces the loop
-        except Exception:
+        except Exception as e:
+            print("[_producer] mic read failed: %s: %s" % (type(e).__name__, e),
+                  file=sys.stderr, flush=True)
             time.sleep(0.2)
             continue
         col = _column(x, sr)
-        recent.extend(x)
+        _publish_audio(x, sr)   # the ONLY place mic audio enters the process
+
+        # Every ~1.2s (i%12), do the heavier full analyze() - outside the lock, since it
+        # doesn't touch _WF and holding the lock during an FFT would stall /spectrum-stream.
+        facts = None
+        if i % 12 == 0:
+            try:
+                window, _ = _tail_samples(1.5)   # same shared buffer the handlers read
+                facts = T.analyze(window, sr) if window.size > sr // 2 else None
+            except Exception as e:
+                print("[_producer] analyze failed: %s: %s" % (type(e).__name__, e),
+                      file=sys.stderr, flush=True)
+                facts = None
+
         with _WF_LOCK:
             _WF["seq"] += 1
             _WF["cols"].append((_WF["seq"], col))
-            if i % 12 == 0 and len(recent) > sr // 2:
-                try:
-                    _WF["label"] = T.analyze(np.array(recent), sr).get("label", "")
-                except Exception:
-                    pass
+            if facts is not None:
+                _WF["label"] = facts.get("label", "")
+
+        if facts is not None:
+            last_facts = facts
+        # Repaint on its own clock, decoupled from both the 10 Hz producer tick and the ~1.2 s
+        # analyze cadence. The header numbers come from the most recent analyze; the trace comes
+        # from THIS tick's audio. No-op while paused; never raises.
+        now = time.monotonic()
+        if DISPLAY_FPS <= 0 or now - last_render >= 1.0 / DISPLAY_FPS:
+            last_render = now
+            T.update_live_display(last_facts, samples=x, sr=sr)
         i += 1
 
 
@@ -284,6 +481,13 @@ def _ensure_producer():
             return
         _WF_STARTED = True
     threading.Thread(target=_producer, daemon=True).start()
+
+
+@app.on_event("startup")
+def _start_producer_on_boot():
+    # Start immediately rather than waiting for the first /spectrum-stream hit, so the live
+    # display is already reacting to the mic even if nobody's opened /scope.
+    _ensure_producer()
 
 
 @app.get("/spectrum-stream", include_in_schema=False)

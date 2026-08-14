@@ -5,3 +5,5 @@ matplotlib>=3.7
 ollama>=0.3          # Stage 4: local LLM tool-calling for agent.py
 fastapi>=0.110       # Stage 6: HTTP tool service (Open WebUI / NFC / clients)
 uvicorn>=0.29        # ASGI server for service.py
+luma.oled>=3.13      # Display build: SSD1306 OLED renderer (Jetson only)
+spidev>=3.6          # Display build: SK9822 LED bar over SPI (Jetson only, Linux-only package)
