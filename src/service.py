@@ -103,7 +103,8 @@ def healthz():
     # (the failure that silently killed /scope), so surface it here instead of only in the logs.
     return {"status": "ok", "microphone_available": len(devs) > 0,
             "input_devices": devs, "demo_mode": DEMO,
-            "waterfall_columns": columns, "input_device_index": T.input_device()}
+            "waterfall_columns": columns, "input_device_index": T.input_device(),
+            "display": T.display_status()}
 
 
 @app.post("/analyze", summary="Analyze the current sound")
@@ -261,6 +262,40 @@ def display_text(req: TextReq):
     it is different from the display tool, which shows the live sound spectrum. The message stays
     up until the display tool is called again."""
     return T.show_text_on_display(text=req.text, scroll=req.scroll)
+
+
+class LedReq(BaseModel):
+    colour: Optional[str] = None      # name, #RRGGBB or "r,g,b"
+    level: Optional[float] = None     # 0-100 percent of the bar lit
+    brightness: Optional[float] = None
+
+
+@app.post("/display/led", summary="Set the LED bar colour and level")
+def display_led(req: LedReq):
+    """Manually control the physical LED bar: set its COLOUR, how much of it is LIT, or its
+    brightness. Call this when the user asks to make the LEDs/bar/lights a colour ('make the
+    leds blue', 'turn the bar red'), fill it to a level, or hold it steady. Setting only a
+    colour keeps the bar reacting to loudness in that colour. Call the display tool to hand it
+    back to the sound."""
+    return T.set_led_bar(colour=req.colour, level=req.level, brightness=req.brightness)
+
+
+@app.post("/display/status", summary="What the display is doing right now")
+def display_state():
+    """Report what the physical display is doing right now: the colour currently sent to the LED
+    bar, how many pixels are lit, whether the live feed is paused or scrolling text, and any
+    render error. Call this when the user asks what the display, OLED or LED bar is doing or
+    showing, what colour it is, whether it is working, or why it looks stuck."""
+    return T.get_display_status()
+
+
+@app.post("/display/selftest", summary="Visually test the OLED and LED bar")
+def display_selftest():
+    """Run a visual self-test of the physical OLED and LED bar - solid colours, brightness ramp,
+    single-pixel chase, VU sweep - then return to the live display. Takes about 10 seconds. Call
+    this when the user asks to test or check the display, OLED, LED bar or lights. Afterwards,
+    tell the user what should have appeared and ask whether they saw it."""
+    return T.run_display_selftest()
 
 
 @app.post("/display/clear", summary="Turn off the display")

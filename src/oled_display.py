@@ -98,7 +98,10 @@ def _window_ms(dominant_hz):
     return min(WAVE_MS_MAX, max(WAVE_MS_MIN, WAVE_CYCLES * 1000.0 / float(dominant_hz)))
 
 
-def show_wave(device, samples, sr=44100, text="", dominant_hz=0):
+WAVE_MIN_LEVEL = 0.04   # a barely-audible trace still shows a line, not an empty screen
+
+
+def show_wave(device, samples, sr=44100, text="", dominant_hz=0, level=None):
     """Oscilloscope trace: plot the actual waveform below the header line.
 
     Two details make it readable rather than a jittering smear:
@@ -124,7 +127,21 @@ def show_wave(device, samples, sr=44100, text="", dominant_hz=0):
     if seg.size < 2:
         return
 
-    seg = seg / max(float(np.max(np.abs(seg))), WAVE_FLOOR)
+    # Shape and size are set separately. Dividing by the window peak keeps the SHAPE readable
+    # at any input level; `level` (0..1 mapped from rms_db) then sets the HEIGHT, so a quiet
+    # sound draws a small wave and a loud one fills the panel. Without it the renderer is pure
+    # auto-gain and a whisper looks identical to a shout.
+    peak = float(np.max(np.abs(seg)))
+    if level is None:
+        # Auto-gain: WAVE_FLOOR stops near-silence being amplified into full-screen noise.
+        seg = seg / max(peak, WAVE_FLOOR)
+    else:
+        # Normalise the shape fully, then let `level` alone set the height. The WAVE_FLOOR
+        # clamp must NOT apply here - it would attenuate quiet input a second time on top of
+        # the level scaling, and a -50 dB tone would flatten to a 1 px line instead of a small
+        # but visible wave.
+        seg = seg / max(peak, 1e-9)
+        seg = seg * max(WAVE_MIN_LEVEL, min(1.0, float(level)))
     top = BAR_AREA_TOP
     mid = top + (HEIGHT - top) // 2
     amp = (HEIGHT - top) // 2 - 1
@@ -151,18 +168,31 @@ def show_wave(device, samples, sr=44100, text="", dominant_hz=0):
             draw.line([(c, y) for c, y in enumerate(ys)], fill="white")
 
 
-def text_strip(text):
-    """Render `text` as one long single-line image for a marquee.
+SCROLL_GAP = 24   # blank pixels between the end of the message and its next repetition
 
-    Padded with a blank screen-width at each end so the message scrolls fully off before
-    it re-enters. The default PIL bitmap font is used deliberately: python:3.11-slim ships
-    no TrueType fonts, so ImageFont.truetype() works on a dev Mac but raises in the container.
+
+def marquee_tile(text, gap=SCROLL_GAP):
+    """Build a seamlessly-loopable marquee image. Returns (tile, span).
+
+    The tile is the message plus a short trailing gap, repeated TWICE side by side. Sliding a
+    128 px window from 0 to `span` (one message-plus-gap width) and then restarting lands
+    exactly back where it began, so the loop is continuous.
+
+    Padding the message with a full screen width at each end instead - the obvious approach -
+    means every cycle ends with 128 px of empty scrolling. At 30 px/s that is a four-second
+    blank gap, which reads as the marquee stopping and starting again rather than looping.
+
+    The default PIL bitmap font is deliberate: python:3.11-slim ships no TrueType fonts, so
+    ImageFont.truetype() works on a dev Mac but raises in the container.
     """
     from PIL import Image, ImageDraw
     text = " ".join(str(text).split())          # a marquee is one line: flatten any newlines
-    strip = Image.new("1", (CHAR_W * len(text) + 2 * WIDTH, HEIGHT))
-    ImageDraw.Draw(strip).text((WIDTH, (HEIGHT - 11) // 2), text, fill="white")
-    return strip
+    span = max(WIDTH + gap, CHAR_W * len(text) + gap)
+    tile = Image.new("1", (span * 2, HEIGHT))
+    draw = ImageDraw.Draw(tile)
+    for x in (0, span):                          # the second copy is what the window wraps into
+        draw.text((x, (HEIGHT - 11) // 2), text, fill="white")
+    return tile, span
 
 
 def hello(device):

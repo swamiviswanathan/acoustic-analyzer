@@ -13,6 +13,8 @@ is wired in - see DISPLAY-BUILD.md "Software hooks".
 """
 
 import argparse
+import colorsys
+import math
 import time
 
 import spidev
@@ -71,17 +73,72 @@ def led_vu(spi, level, num_leds=NUM_LEDS, brightness=8):
     write_frame(spi, pixels)
 
 
+def led_rgb_vu(spi, level, rgb, num_leds=NUM_LEDS, brightness=8):
+    """Two independent axes on one strip: how MANY pixels light tracks loudness, and their
+    COLOUR carries the spectrum's shape. Loudness and tone stay readable at a glance.
+
+    Takes a colour rather than deriving one, so the meaning of "what colour is this sound"
+    lives with the DSP (acoustic_tools) and this module stays a dumb pixel driver.
+    """
+    lit = int(max(0.0, min(1.0, level)) * num_leds)
+    r, g, b = (max(0, min(255, int(c))) for c in rgb)
+    write_frame(spi, [(r, g, b, brightness) if i < lit else (0, 0, 0, 0)
+                      for i in range(num_leds)])
+
+
+def selftest(spi, num_leds=NUM_LEDS, hold=0.6, chase=True):
+    """Staged visual test of the whole strip.
+
+    Worth having as a first-class function rather than a one-off script: SPI has no ACK, so
+    write_frame() returns happily into a disconnected strip, dead level shifter or unpowered
+    rail. Nothing in the software can tell you the bar stopped working - only eyes can, and
+    only if there is something to look at.
+
+    Each stage isolates one failure mode: solid colours catch RGB byte-order mistakes, the
+    brightness ramp catches a stuck 5-bit field, the chase catches NUM_LEDS being wrong or a
+    broken joint mid-strip, and the VU sweep exercises the function the live loop actually calls.
+    """
+    all_off(spi, num_leds)
+    time.sleep(0.2)
+    for colour in ((255, 0, 0), (0, 255, 0), (0, 0, 255)):
+        write_frame(spi, [colour + (6,)] * num_leds)
+        time.sleep(hold)
+    for b in (1, 8, 31):
+        write_frame(spi, [(255, 255, 255, b)] * num_leds)
+        time.sleep(hold / 2)
+    if chase:
+        for i in range(num_leds):
+            pixels = [(0, 0, 0, 0)] * num_leds
+            pixels[i] = (255, 255, 255, 8)
+            write_frame(spi, pixels)
+            time.sleep(hold / 3)
+    for step in range(11):
+        led_vu(spi, step / 10.0, num_leds, brightness=8)
+        time.sleep(hold / 6)
+    all_off(spi, num_leds)
+    return ["solid red, green, blue across all %d pixels" % num_leds,
+            "white brightness ramp, dim to full",
+            "single white pixel walking 1 to %d" % num_leds,
+            "green-to-red VU bar filling from empty to full"]
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--off", action="store_true", help="blank the strip")
     ap.add_argument("--test", action="store_true", help="light pixel 0 white, then blank")
+    ap.add_argument("--selftest", action="store_true", help="full staged visual test")
     ap.add_argument("--num-leds", type=int, default=NUM_LEDS)
     args = ap.parse_args()
 
     spi = open_spi()
     all_off(spi, args.num_leds)   # always start blank
 
-    if args.test:
+    if args.selftest:
+        print("Running LED self-test on %d pixels. You should see:" % args.num_leds)
+        for line in selftest(spi, args.num_leds):
+            print("  - %s" % line)
+        print("Blanked.")
+    elif args.test:
         print(f"Lighting pixel 0 on a {args.num_leds}-LED strip for 2s...")
         pixels = [(0, 0, 0, 0)] * args.num_leds
         pixels[0] = (255, 255, 255, 8)

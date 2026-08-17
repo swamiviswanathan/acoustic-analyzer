@@ -27,6 +27,8 @@ spec:
               value: "0"                    # LIVE: records from the USB audio adapter (hw:0,0)
             - name: DISPLAY_FPS
               value: "3"                    # OLED scope repaints/sec. Lower = calmer trace.
+            - name: SCROLL_PX_S
+              value: "30"                   # marquee speed in px/sec. Lower = slower scroll.
             - name: PUBLIC_URL
               value: "http://sachin-jetson.local:30800"   # so /spectrum hands back a browser-openable /scope link
           readinessProbe:

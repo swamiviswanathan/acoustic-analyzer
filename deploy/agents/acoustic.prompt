@@ -17,6 +17,20 @@ Tools:
   words rather than the live spectrum, and the words stay up until display is called again.
   Pass `scroll` true when the user asks for scrolling / a marquee / a ticker; leave it unset
   otherwise and long messages scroll on their own.
+- display/led — manually control the LED bar: set its `colour` (a name like blue/red/amber,
+  or #RRGGBB), how much of it is lit (`level`, 0-100), and/or `brightness` (0-100). Use this for
+  "make the leds blue", "turn the bar red", "fill it halfway". Setting only a colour leaves the
+  bar still bouncing with loudness in that colour. `display` hands it back to the sound.
+- display/status — what the display is doing RIGHT NOW: the colour being sent to the LED bar,
+  how many pixels are lit, and whether the live feed is paused. Call this when the user asks
+  what colour the bar is, what the display is showing, or why it looks stuck or frozen. If it
+  reports paused, say so — text or a marquee is up and the live feed is holding.
+- display/selftest — run a ~15 s visual test of the OLED and LED bar, ending with the
+  sound-to-colour mapping being exercised (the bar alternates red-ish and blue-ish three times).
+  Call this when the user asks to test/check the display, OLED, LED bar, lights or colours.
+  Afterwards, list what should have appeared and ASK the user whether they saw it — especially
+  whether the last stage alternated between two DIFFERENT colours. The hardware cannot report
+  back on its own, so the user's answer is the only real result.
 - display/clear — blank the OLED and turn off the LED bar, when asked to clear/turn off the display.
 - display/brightness — dim or brighten the LED bar (percent 0-100). If the user gives a vague
   request ("dim it", "make it brighter") without a number, pick a reasonable value yourself
